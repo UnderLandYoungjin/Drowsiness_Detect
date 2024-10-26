@@ -47,7 +47,7 @@ cap = cv2.VideoCapture(input_path)
 frame_width, frame_height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 fps = cap.get(cv2.CAP_PROP_FPS)
 
-# 비디오 저장 설정 (코덱 변경 시 'XVID'로 변경 가능)
+# 비디오 저장 설정
 fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 video_out = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
 
@@ -100,11 +100,30 @@ with mp_face_mesh.FaceMesh(
                 cpoint_distance = np.sqrt((face_center_x - avg_face_center_x) ** 2 + (face_center_y - avg_face_center_y) ** 2)
                 distance_values.append(cpoint_distance)
 
-                # 텍스트 표시
+                # 텍스트 및 점 표시
                 frame_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                 draw = ImageDraw.Draw(frame_pil)
                 draw.text((30, 30), f'EAR: {ear_value:.2f}', font=large_font, fill=(0, 255, 0))
                 draw.text((30, 70), f'Cpoint Dist: {cpoint_distance:.1f}', font=large_font, fill=(0, 255, 0))
+
+                # 각 랜드마크에 연두색 별표와 p1~p12 레이블 추가
+                for i, (x, y) in enumerate(left_eye_points):
+                    draw.text((x + 3, y - 10), f'p{i+1}', font=small_font, fill=(255, 255, 0))  # 노란색 레이블 추가
+                    draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=(0, 255, 0))  # 연두색 점으로 표시
+                for i, (x, y) in enumerate(right_eye_points):
+                    draw.text((x + 3, y - 10), f'p{i+7}', font=small_font, fill=(255, 255, 0))  # 노란색 레이블 추가
+                    draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=(0, 255, 0))  # 연두색 점으로 표시
+
+                # Cpoint와 Avg Cpoint 점 및 텍스트 표시
+                draw.ellipse((face_center_x - 2, face_center_y - 2, face_center_x + 2, face_center_y + 2), fill=(255, 140, 0))  # 주황색 Cpoint
+                draw.text((face_center_x, face_center_y - 10), "Cpoint", font=small_font, fill=(255, 140, 0))  # 주황색 텍스트
+
+                draw.ellipse((avg_face_center_x - 2, avg_face_center_y - 2, avg_face_center_x + 2, avg_face_center_y + 2), fill=(135, 206, 235))  # 하늘색 Avg Cpoint
+                draw.text((avg_face_center_x, avg_face_center_y + 5), "Avg Cpoint", font=small_font, fill=(135, 206, 235))  # 하늘색 텍스트
+
+                # Cpoint와 Avg Cpoint를 더 굵은 빨간색 선으로 연결
+                draw.line([(face_center_x, face_center_y), (avg_face_center_x, avg_face_center_y)], fill=(255, 0, 0), width=2)
+
                 frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
 
                 # 졸음 판정
@@ -137,7 +156,7 @@ ax1.set_title("EAR over Time")
 
 # Cpoint Distance 그래프
 ax2.plot(distance_values, label="Cpoint Distance", color="green")
-ax2.axhline(y=CPOINT_DISTANCE_THRESHOLD, color="orange", linestyle="--", label="Distance Threshold (50)")
+ax2.axhline(y=CPOINT_DISTANCE_THRESHOLD, color="orange", linestyle="--", label="Distance Threshold (30)")
 ax2.set_ylabel("Cpoint Distance")
 ax2.set_xlabel("Frame")
 ax2.legend()
