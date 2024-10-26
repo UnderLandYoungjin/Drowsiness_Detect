@@ -31,3 +31,9 @@ uese_mp4_test파일은 적외선 카메라로 찍은 mp4영상을 사용해서 t
 
 ![image](https://github.com/user-attachments/assets/e62ff34e-e027-4df9-ac13-0c0f5d035e5f)
 
+
+
+
+2024년 10월 26일 토요일
+논문용(핸드폰 만 보고 있는건데 EAR 이 낮다 보니 졸음으로 탐지되는 코드 추가했음
+![image](https://github.com/user-attachments/assets/9d64dd05-26be-4a5e-b40e-beb44b896525)
