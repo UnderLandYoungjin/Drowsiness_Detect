@@ -43,3 +43,9 @@ uese_mp4_test파일은 적외선 카메라로 찍은 mp4영상을 사용해서 t
 
 이거는 완성본?
 ![image](https://github.com/user-attachments/assets/cf556e01-a81e-42c3-a748-850b3b5ade9f)
+
+
+
+EAR만 그래프
+
+![ear_distance_drowsiness_graph](https://github.com/user-attachments/assets/d57e1de9-b3e2-49ab-a7a8-00a0ffe3a9b9)
