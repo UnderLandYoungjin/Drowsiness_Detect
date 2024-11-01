@@ -113,6 +113,15 @@ with mp_face_mesh.FaceMesh(
                 distance_color = (0, 255, 0) if distance_between_centers <= 40 else (255, 0, 0)
                 draw.text((face_center_x + 10, face_center_y - 10), f'Distance: {distance_between_centers:.2f}', font=font_large, fill=distance_color)
 
+                # 얼굴의 바운딩 박스 좌표 계산
+                x_coords = [landmark.x * frame_width for landmark in face_landmarks.landmark]
+                y_coords = [landmark.y * frame_height for landmark in face_landmarks.landmark]
+                x_min, x_max = int(min(x_coords)), int(max(x_coords))
+                y_min, y_max = int(min(y_coords)), int(max(y_coords))
+
+                # 얼굴 바운딩 박스 그리기 (연두색)
+                draw.rectangle([(x_min, y_min), (x_max, y_max)], outline=(0, 255, 0), width=3)
+
                 # 졸음 탐지 기준
                 if ear_value < 0.2 and distance_between_centers > 40:
                     if drowsy_start_time is None:
@@ -154,7 +163,7 @@ with mp_face_mesh.FaceMesh(
                 # 현재 저장된 30초 영상 전송 준비
                 out.release()  # 비디오 작성기 해제
                 timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
-                drowsy_filename = f"/tmp/ACACACACACACACACACACACACACAC_{timestamp}.mp4"
+                drowsy_filename = f"/tmp/drowsy_{timestamp}.mp4"
                 os.rename(output_filename, drowsy_filename)
                 print("졸음 감지 후 15초 추가 녹화 완료: 영상 전송 중")
 
