@@ -18,7 +18,7 @@ font_large = ImageFont.truetype(font_path, 20)  # EAR와 거리 텍스트 크기
 font_small = ImageFont.truetype(font_path, 5)  # p1~p12 포인트 텍스트 크기
 
 # 서버 URL 설정
-upload_url = 'http://221.152.105.81:1200/upload'
+upload_url = 'http://00000000000:1200/upload'
 
 # 왼쪽 및 오른쪽 눈의 랜드마크 인덱스
 LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
