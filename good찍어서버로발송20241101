@@ -1,0 +1,150 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+from collections import deque
+from PIL import Image, ImageFont, ImageDraw
+import os
+from datetime import datetime
+import requests
+
+# Mediapipe 모듈 초기화
+mp_face_mesh = mp.solutions.face_mesh
+mp_drawing = mp.solutions.drawing_utils
+mp_drawing_styles = mp.solutions.drawing_styles
+
+# 리눅스 시스템에 맞는 폰트 경로 설정
+font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"  # 리눅스 기본 폰트 경로
+font = ImageFont.truetype(font_path, 30)
+
+# 서버 URL 설정
+upload_url = 'http://your-server-address/upload'  # 서버 URL로 대체하세요
+
+# 왼쪽 및 오른쪽 눈의 랜드마크 인덱스
+LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
+RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]
+
+# EAR 계산 함수
+def eye_aspect_ratio(eye_points):
+    def euclidean_distance(p1, p2):
+        return np.linalg.norm(p1 - p2)
+
+    ear_left = (euclidean_distance(eye_points[1], eye_points[5]) + 
+                euclidean_distance(eye_points[2], eye_points[4])) / (2.0 * euclidean_distance(eye_points[0], eye_points[3]))
+
+    ear_right = (euclidean_distance(eye_points[7], eye_points[11]) + 
+                 euclidean_distance(eye_points[8], eye_points[10])) / (2.0 * euclidean_distance(eye_points[6], eye_points[9]))
+
+    return (ear_left + ear_right) / 2  # 두 눈의 평균 EAR 반환
+
+# 카메라 초기화
+cap = cv2.VideoCapture(0)
+
+# 얼굴 랜드마크 좌표 저장용 deque
+landmark_hist = deque(maxlen=600)  # 600개의 프레임(약 10분)을 저장할 deque
+
+# 탐지된 졸음 상태 프레임을 버퍼에 저장
+buffer_size = 100  # 예: 100 프레임 저장 (5초 정도)
+frame_buffer = deque(maxlen=buffer_size)
+
+# Face Mesh를 사용한 감지
+with mp_face_mesh.FaceMesh(
+    max_num_faces=1,
+    refine_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+) as face_mesh:
+    drowsy_detected = False  # 졸음 상태 감지 여부
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        frame = cv2.flip(frame, 0)  # 상하 반전 처리
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        result = face_mesh.process(frame_rgb)
+        frame_height, frame_width = frame.shape[:2]
+
+        if result.multi_face_landmarks:
+            for face_landmarks in result.multi_face_landmarks:
+                mp_drawing.draw_landmarks(
+                    image=frame,
+                    landmark_list=face_landmarks,
+                    connections=mp_face_mesh.FACEMESH_TESSELATION,
+                    landmark_drawing_spec=None,
+                    connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_tesselation_style()
+                )
+
+                left_eye_points = np.array([[face_landmarks.landmark[idx].x * frame_width, 
+                                             face_landmarks.landmark[idx].y * frame_height] for idx in LEFT_EYE_IDX])
+                right_eye_points = np.array([[face_landmarks.landmark[idx].x * frame_width, 
+                                              face_landmarks.landmark[idx].y * frame_height] for idx in RIGHT_EYE_IDX])
+
+                ear_value = eye_aspect_ratio(np.concatenate((left_eye_points, right_eye_points), axis=0))
+                face_center_x = int(face_landmarks.landmark[1].x * frame_width)
+                face_center_y = int(face_landmarks.landmark[1].y * frame_height)
+                landmark_hist.append((face_center_x, face_center_y))
+
+                avg_face_center_x = int(np.mean([point[0] for point in landmark_hist]))
+                avg_face_center_y = int(np.mean([point[1] for point in landmark_hist]))
+
+                def euclidean_distance(x1, y1, x2, y2):
+                    return np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+
+                distance_between_centers = euclidean_distance(face_center_x, face_center_y, avg_face_center_x, avg_face_center_y)
+                if distance_between_centers > 50:
+                    drowsiness_message = "Face is off from normal position!"
+                    drowsy_detected = True
+                elif ear_value < 0.2:
+                    drowsiness_message = "Drowsiness Detected: Eyes Closed"
+                    drowsy_detected = True
+                else:
+                    drowsiness_message = ""
+                    drowsy_detected = False
+
+                # PIL로 텍스트와 그래픽 추가
+                frame_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                draw = ImageDraw.Draw(frame_pil)
+                draw.text((30, 30), f'EAR: {ear_value:.2f}', font=font, fill=(0, 255, 0))
+                if drowsiness_message:
+                    draw.text((30, 70), drowsiness_message, font=font, fill=(255, 0, 0))
+
+                draw.text((face_center_x + 10, face_center_y), f'Ccurrent: ({face_center_x}, {face_center_y})', font=font, fill=(255, 0, 120))
+                draw.text((avg_face_center_x + 10, avg_face_center_y), f'Cavg: ({avg_face_center_x}, {avg_face_center_y})', font=font, fill=(0, 120, 0))
+                frame = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
+
+                if drowsy_detected:
+                    frame_buffer.append(frame)
+
+        # 화면에 결과 출력
+        cv2.imshow('Drowsiness Detection', frame)
+
+        # 프레임 버퍼가 가득 차면 파일로 저장하고 서버에 전송
+        if len(frame_buffer) >= buffer_size:
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+            filename = f"/tmp/drowsy_{timestamp}.mp4"
+            out = cv2.VideoWriter(filename, cv2.VideoWriter_fourcc(*'mp4v'), 20, (frame_width, frame_height))
+
+            for buffered_frame in frame_buffer:
+                out.write(buffered_frame)
+            out.release()
+            frame_buffer.clear()
+
+            # 서버에 파일 전송
+            with open(filename, 'rb') as f:
+                files = {'file': f}
+                response = requests.post(upload_url, files=files)
+                if response.status_code == 200:
+                    print("파일 전송 완료")
+                else:
+                    print("파일 전송 실패")
+
+            # 파일 삭제
+            os.remove(filename)
+
+        if cv2.waitKey(5) & 0xFF == 27:
+            break
+
+# 카메라 종료
+cap.release()
+cv2.destroyAllWindows()
