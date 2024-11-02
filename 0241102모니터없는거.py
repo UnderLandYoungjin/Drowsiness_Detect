@@ -62,6 +62,9 @@ additional_recording_start_time = None  # 추가 녹화 시작 시간
 # 얼굴 중앙 좌표 히스토리
 landmark_hist = deque(maxlen=600)  # 약 10분간 중앙 좌표 저장
 
+# ** 프레임 버퍼 추가: 졸음 감지 이전 15초 프레임 저장 **
+pre_drowsy_buffer = deque(maxlen=15 * FPS)  # 15초 동안의 프레임 저장
+
 # Face Mesh를 사용한 감지
 with mp_face_mesh.FaceMesh(
     max_num_faces=1,
@@ -180,6 +183,9 @@ with mp_face_mesh.FaceMesh(
         # 시각 정보가 추가된 PIL 이미지를 OpenCV 형식으로 변환하여 최종 시각화 프레임 생성
         frame_visual = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
 
+        # ** 프레임 버퍼에 시각화 및 원본 프레임 저장 **
+        pre_drowsy_buffer.append((frame_visual, original_frame))
+
         # 졸음이 감지되었고, 전송되지 않은 경우에만 추가 녹화 시작
         if drowsy_detected and not sent_video:
             sent_video = True
@@ -189,6 +195,11 @@ with mp_face_mesh.FaceMesh(
             # 비디오 작성기 설정
             out_visual = cv2.VideoWriter(visual_output_filename, fourcc, FPS, (frame_width, frame_height))
             out_original = cv2.VideoWriter(original_output_filename, fourcc, FPS, (frame_width, frame_height))
+
+            # ** 버퍼에 저장된 프레임 기록 (졸음 감지 이전 15초) **
+            for buffered_frame_visual, buffered_frame_original in pre_drowsy_buffer:
+                out_visual.write(buffered_frame_visual)
+                out_original.write(buffered_frame_original)
 
         # 추가 15초 녹화가 활성화된 경우
         if recording_additional_15_seconds:
