@@ -42,7 +42,7 @@ except Exception as e:
     font_small = ImageFont.load_default()
 
 # 서버 URL 설정
-upload_url = 'http://0000000:1200/upload'
+upload_url = 'http://221.152.105.81:1200/upload'
 
 # 왼쪽 및 오른쪽 눈의 랜드마크 인덱스
 LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]
@@ -101,7 +101,7 @@ with mp_face_mesh.FaceMesh(
             break
 
         # 상하 반전 및 RGB 변환 0은 상하 반전 1은 좌우반전
-        #frame = cv2.flip(frame, 0)
+        frame = cv2.flip(frame, 1)
 
         # YOLO 모델로 안전벨트 탐지 - OpenCV 프레임 사용
         yolo_results = seatbelt_model(frame)
