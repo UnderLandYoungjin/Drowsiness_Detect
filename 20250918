@@ -1,0 +1,404 @@
+# 경로: ./drowsy_recorder_local_save.py
+# 목적: YOLO(안전벨트 검출) 및 서버 업로드(HTTP POST)를 제거하고,
+#      MediaPipe FaceMesh 기반 졸음/전방주시 지표 산출, 사전 버퍼 포함 자동 녹화,
+#      로컬 폴더(recordings/날짜 디렉터리)에 MP4 파일(시각화/원본)을 저장하도록 구현한다.
+
+import cv2                                       # OpenCV 사용: 카메라 캡처, 색공간 변환, 영상 저장 등에 필요
+import mediapipe as mp                           # MediaPipe 사용: FaceMesh(얼굴 랜드마크) 추정에 필요
+import numpy as np                               # NumPy 사용: 벡터/행렬 연산(EAR 거리 계산 등)에 필요
+from PIL import Image, ImageFont, ImageDraw      # PIL 사용: 한글 텍스트 렌더링, 도형 그리기(상태 박스/라벨 표시)에 필요
+import os                                        # OS 경로/파일 처리(폴더 생성, 파일 삭제 등)에 필요
+from datetime import datetime                    # 날짜/시간 문자열(폴더/파일명 타임스탬프) 생성을 위해 필요
+import time                                      # 시간 제어(FPS 맞춤 대기, 지속 시간 계산, 쿨다운) 위해 필요
+from collections import deque                    # 고정 길이 버퍼(사전 프레임 저장) 구현 위해 필요
+
+# Mediapipe 네임스페이스 참조 초기화
+mp_face_mesh = mp.solutions.face_mesh            # MediaPipe의 FaceMesh 솔루션을 간편히 참조하기 위해 별칭 할당
+
+# ======== 사용자 편의: 로컬 저장 루트 폴더 설정 ========
+OUTPUT_ROOT = "./recordings"                     # 모든 녹화 결과를 저장할 루트 디렉터리 경로(상대 경로)
+# 날짜별 하위 폴더가 자동 생성되며, 파일은 recordings/YYYYMMDD/ 에 저장되도록 설계한다
+
+# ======== 한글 폰트 탐색 함수 ========
+def find_font():
+    # 운영체제별로 존재 가능성이 높은 한글 폰트 경로 후보를 리스트로 정의한다
+    font_paths = [
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",         # (리눅스) 나눔고딕 기본체 경로 후보
+        "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf",     # (리눅스) 나눔고딕 볼드체 경로 후보
+        "/usr/share/fonts/nanum/NanumGothic.ttf",                  # (리눅스) 다른 배포판에서의 나눔고딕 경로
+        "/usr/share/fonts/nanum/NanumGothicBold.ttf",              # (리눅스) 다른 배포판에서의 나눔고딕 볼드 경로
+        "/usr/share/fonts/truetype/nanum/NanumGothic/NanumGothic.ttf",      # (리눅스) 변형 경로
+        "/usr/share/fonts/truetype/nanum/NanumGothicBold/NanumGothicBold.ttf",# (리눅스) 변형 경로(볼드)
+        "/usr/share/fonts/truetype/malgun/malgun.ttf",             # (일부 환경) 맑은고딕 경로 후보
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"     # (대체) DejaVu Sans Bold(한글 완전 지원 아님)
+    ]
+    # 각 경로를 순회하며 로드 성공 시 해당 폰트를 즉시 반환한다
+    for path in font_paths:
+        try:
+            return ImageFont.truetype(path, 20)                    # 우선 크기 20으로 로드(이후 크기 재설정)
+        except Exception:
+            continue                                               # 실패하면 다음 후보 경로를 시도
+    # 모든 후보가 실패하면 PIL 기본 폰트를 사용한다(한글 렌더링 제약 가능성 있음)
+    print("한글 폰트를 찾을 수 없습니다. 기본 폰트를 사용합니다.")    # 경고 메시지 출력
+    try:
+        return ImageFont.load_default()                            # 기본 폰트 반환
+    except Exception:
+        print("폰트 로드 실패")                                    # 기본 폰트 로드마저 실패할 경우 경고
+        raise                                                      # 치명적 예외로 실행 중단
+
+# ======== 폰트 크기 설정 및 안전 로드 ========
+font_large = find_font()                                          # 우선 폰트를 탐색하여 객체를 받는다
+font_size_large = 16                                              # 큰 글자(상태 박스 텍스트 등) 표시 크기 설정
+font_size_small = 4                                               # 아주 작은 라벨(랜드마크 포인트 라벨) 표시 크기 설정
+try:
+    # truetype로 로딩된 폰트 객체만 .path 속성이 있을 수 있으므로 getattr로 안전 접근
+    font_large = ImageFont.truetype(getattr(font_large, "path", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+                                    font_size_large)               # 큰 글자용 폰트를 원하는 크기로 재로드한다
+    font_small = ImageFont.truetype(getattr(font_large, "path", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+                                    font_size_small)               # 작은 글자용 폰트를 원하는 크기로 재로드한다
+except Exception:
+    # 경로 재지정이 실패한 경우 기본 폰트를 사용(한글 렌더링 품질 저하 가능)
+    font_large = ImageFont.load_default()                          # 큰 글자용 폰트를 기본 폰트로 대체
+    font_small = ImageFont.load_default()                          # 작은 글자용 폰트를 기본 폰트로 대체
+
+# ======== FaceMesh에서 사용할 눈 랜드마크 인덱스(미디안/논문 관례 기반) ========
+LEFT_EYE_IDX = [33, 160, 158, 133, 153, 144]                      # 왼쪽 눈 EAR 산출에 필요한 6개 포인트 인덱스
+RIGHT_EYE_IDX = [362, 385, 387, 263, 373, 380]                    # 오른쪽 눈 EAR 산출에 필요한 6개 포인트 인덱스
+
+# ======== 프레임 처리 및 녹화 관련 상수 ========
+FPS = 20                                                          # 목표 FPS(20fps)로 처리/저장을 수행
+BUFFER_SECONDS = 15                                               # 트리거 이전 사전 프레임 버퍼 길이(초)
+RECORDING_SECONDS = 30                                            # 총 녹화 길이(초) = 사전+사후 합계
+BUFFER_SIZE = BUFFER_SECONDS * FPS                                # 사전 버퍼 프레임 개수(정수)
+TOTAL_FRAMES = RECORDING_SECONDS * FPS                            # 최종 저장 프레임 개수(정수)
+
+# ======== 사전 버퍼 및 녹화 버퍼 관리 클래스 ========
+class FrameBuffer:
+    # 시각화 프레임과 원본 프레임을 쌍으로 저장하며, 트리거 시 사전 버퍼 포함 전체 클립을 만든다
+    def __init__(self, maxlen):
+        self.buffer = deque(maxlen=maxlen)                         # 사전 버퍼: 최대 maxlen 길이로 오래된 프레임부터 자동 폐기
+        self.recording_buffer = []                                 # 녹화 중 수집되는 프레임들을 저장할 리스트
+        self.is_recording = False                                  # 현재 녹화 상태 플래그(False=대기, True=녹화 중)
+        self.start_time = None                                     # 녹화 시작 시각(진행 시간 측정 등에 사용 가능)
+        self.frame_count = 0                                       # 녹화 버퍼에 누적된 프레임 수
+
+    def add_frame(self, visual_frame, original_frame):
+        self.buffer.append((visual_frame.copy(), original_frame.copy()))  # 사전 버퍼에 현재 프레임 쌍 추가
+        if self.is_recording:                                      # 녹화 중이라면
+            self.recording_buffer.append((visual_frame.copy(), original_frame.copy()))  # 녹화 버퍼에도 프레임 쌍 추가
+            self.frame_count += 1                                  # 누적 프레임 수 증가
+
+    def start_recording(self):
+        self.is_recording = True                                   # 녹화 상태 시작
+        self.start_time = time.time()                              # 녹화 시작 시각 기록
+        self.recording_buffer = list(self.buffer)                  # 사전 버퍼 내용을 그대로 녹화 버퍼로 초기화(사전 구간 포함)
+        self.frame_count = len(self.recording_buffer)              # 현재 녹화 프레임 수를 사전 버퍼 길이로 설정
+
+    def should_stop_recording(self):
+        return self.frame_count >= TOTAL_FRAMES                    # 목표 프레임 수에 도달했는지 여부 반환
+
+    def get_recording_frames(self):
+        return self.recording_buffer[:TOTAL_FRAMES]                # 정확히 TOTAL_FRAMES 길이만 반환(초과분 절단)
+
+    def clear_recording(self):
+        self.recording_buffer = []                                 # 녹화 버퍼를 비움
+        self.is_recording = False                                  # 녹화 상태 해제
+        self.start_time = None                                     # 시작 시각 초기화
+        self.frame_count = 0                                       # 프레임 카운터 초기화
+# 경로: ./drowsy_recorder_local_save.py
+# 목적: 로컬 폴더 저장판 - EAR 계산, 로컬 저장 함수, 상태 박스 그리기 (2/3)
+
+# ======== EAR(Eye Aspect Ratio) 계산 함수 ========
+def eye_aspect_ratio(eye_points):
+    # 내부 함수: 두 점 간 유클리드 거리 계산
+    def euclidean_distance(p1, p2):
+        return np.linalg.norm(p1 - p2)                             # NumPy의 L2 노름으로 거리 계산
+    # 왼쪽 눈 EAR: (수직 거리 합) / (2 * 수평 거리)
+    ear_left = (euclidean_distance(eye_points[1], eye_points[5]) +
+                euclidean_distance(eye_points[2], eye_points[4])) / (2.0 * euclidean_distance(eye_points[0], eye_points[3]))
+    # 오른쪽 눈 EAR: 동일 수식(우안 포인트 인덱스에 대해 적용)
+    ear_right = (euclidean_distance(eye_points[7], eye_points[11]) +
+                 euclidean_distance(eye_points[8], eye_points[10])) / (2.0 * euclidean_distance(eye_points[6], eye_points[9]))
+    return (ear_left + ear_right) / 2                              # 좌/우 EAR 평균 반환
+
+# ======== 로컬 파일 저장 전용 함수(서버 업로드 제거) ========
+def save_video_locally(frames, frame_size):
+    # 설명: 전달받은 프레임 쌍 리스트를 시각화/원본 두 개의 MP4로 저장하고, recordings/날짜 폴더로 정리한다
+    date_str = datetime.now().strftime('%Y%m%d')                   # 오늘 날짜(YYYYMMDD)를 문자열로 생성
+    time_str = datetime.now().strftime('%H%M%S')                   # 현재 시간(HHMMSS)을 문자열로 생성
+    save_dir = os.path.join(OUTPUT_ROOT, date_str)                 # recordings/YYYYMMDD 형태의 저장 폴더 경로 구성
+    os.makedirs(save_dir, exist_ok=True)                           # 폴더가 없으면 생성(있으면 무시)
+
+    visual_filename = os.path.join(save_dir, f"CAL_01_V_{date_str}_{time_str}.mp4")  # 시각화 영상 파일 경로
+    original_filename = os.path.join(save_dir, f"CAL_01_O_{date_str}_{time_str}.mp4")# 원본 영상 파일 경로
+
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')                       # mp4v FourCC 코드 생성
+    out_visual = cv2.VideoWriter(visual_filename, fourcc, FPS, frame_size)   # 시각화 영상 저장기 초기화
+    out_original = cv2.VideoWriter(original_filename, fourcc, FPS, frame_size)# 원본 영상 저장기 초기화
+
+    if not out_visual.isOpened() or not out_original.isOpened():   # 저장기 초기화 실패 여부 확인
+        print("[오류] 비디오 저장기 초기화 실패")                    # 실패 메시지 출력
+        return                                                     # 저장을 중단
+
+    try:
+        for frame_visual, frame_original in frames:                # 전달된 프레임 쌍을 순회
+            out_visual.write(frame_visual)                         # 시각화 프레임을 파일에 기록
+            out_original.write(frame_original)                     # 원본 프레임을 파일에 기록
+    finally:
+        out_visual.release()                                       # 시각화 저장기 닫기(파일 마무리)
+        out_original.release()                                     # 원본 저장기 닫기(파일 마무리)
+
+    print(f"[저장 완료] 시각화: {visual_filename}")                 # 저장 경로(시각화) 출력
+    print(f"[저장 완료] 원본   : {original_filename}")              # 저장 경로(원본) 출력
+
+# ======== 좌측 상단 상태 박스(텍스트/지표) 그리기 ========
+def draw_status_box(draw, frame_width, frame_height, drowsy_status, seatbelt_status,
+                    ear_value=0, distance=0, belt_conf=0, face_detected=False):
+    # 박스 사양 정의
+    box_width = 140                                               # 상태 박스 너비
+    box_height = 140                                              # 상태 박스 높이
+    margin = 2                                                    # 화면 경계 여백
+    x = margin                                                    # 박스 좌상단 X 좌표
+    y = margin                                                    # 박스 좌상단 Y 좌표
+
+    # 배경 박스(검정 배경, 흰색 외곽선)
+    draw.rectangle([(x, y), (x + box_width, y + box_height)],
+                   fill=(0, 0, 0), outline=(255, 255, 255), width=2)  # 시인성 높은 박스를 그림
+
+    # 항목 라벨 텍스트
+    drowsy_text = "졸음여부"                                      # 졸음 여부 라벨
+    belt_text = "안전벨트"                                        # 안전벨트 라벨(현재 YOLO 미사용 → 고정 표기)
+
+    # 상태 텍스트 색상/내용 결정
+    if not face_detected:                                         # 얼굴 미검출이면
+        drowsy_value = "미감지"                                   # '미감지'로 표기
+        drowsy_color = (255, 165, 0)                              # 주황색으로 경고성 표기
+    else:                                                         # 얼굴이 검출되면
+        drowsy_value = "졸음" if drowsy_status else "정상"         # EAR/중심 이동량 지표 기반 상태
+        drowsy_color = (255, 0, 0) if drowsy_status else (0, 255, 0) # 졸음=빨강, 정상=초록
+
+    belt_value = "미착용" if not seatbelt_status else "착용"       # YOLO 제거로 seatbelt_status는 항상 False로 들어옴
+    belt_color = (255, 0, 0) if not seatbelt_status else (0, 255, 0) # 표시만 유지(빨강 고정)
+
+    # 보조 지표 계산(N/A 처리 포함)
+    if face_detected:                                             # 얼굴 검출 시
+        eye_close_percent = max(0, min(100, (1 - ear_value / 0.3) * 100))  # EAR 기반 눈감김 정도(%)
+        attention_percent = 100 - min(100, distance / 2)          # 중심 이동량 기반 전방주시 정도(%): 단순 지표
+    else:                                                         # 얼굴 미검출 시
+        eye_close_percent = 0                                     # 눈감김 지표 0%(N/A 의미)
+        attention_percent = 0                                     # 전방주시 지표 0%(N/A 의미)
+
+    # 텍스트 행 위치 계산(간격 = 25px)
+    x_text = x + 10                                               # 텍스트 시작 X
+    y_text1 = y + 10                                              # 1행: 졸음여부
+    y_text2 = y_text1 + 25                                        # 2행: 안전벨트
+    y_text3 = y_text2 + 25                                        # 3행: 벨트확률(현재 0.0 고정 표기)
+    y_text4 = y_text3 + 25                                        # 4행: 눈감김 %
+    y_text5 = y_text4 + 25                                        # 5행: 전방주시 %
+
+    # 텍스트 외곽(검정) 그림자 4방향으로 먼저 찍어 가독성 향상
+    for offset in [(-1,-1), (-1,1), (1,-1), (1,1)]:
+        draw.text((x_text + offset[0], y_text1 + offset[1]), f"{drowsy_text}: {drowsy_value}",
+                  font=font_large, fill=(0, 0, 0))                # 졸음여부 그림자
+        draw.text((x_text + offset[0], y_text2 + offset[1]), f"{belt_text}: {belt_value}",
+                  font=font_large, fill=(0, 0, 0))                # 안전벨트 그림자
+        draw.text((x_text + offset[0], y_text3 + offset[1]), f"벨트확률: {belt_conf:.1f}%",
+                  font=font_large, fill=(0, 0, 0))                # 벨트확률 그림자
+        if face_detected:                                         # 얼굴 검출 시
+            draw.text((x_text + offset[0], y_text4 + offset[1]), f"눈감김: {eye_close_percent:.1f}%",
+                      font=font_large, fill=(0, 0, 0))            # 눈감김% 그림자
+            draw.text((x_text + offset[0], y_text5 + offset[1]), f"전방주시: {attention_percent:.1f}%",
+                      font=font_large, fill=(0, 0, 0))            # 전방주시% 그림자
+        else:                                                     # 얼굴 미검출 시
+            draw.text((x_text + offset[0], y_text4 + offset[1]), "눈감김: N/A",
+                      font=font_large, fill=(0, 0, 0))            # 눈감김 N/A 그림자
+            draw.text((x_text + offset[0], y_text5 + offset[1]), "전방주시: N/A",
+                      font=font_large, fill=(0, 0, 0))            # 전방주시 N/A 그림자
+
+    # 실제 본문 텍스트(색상 적용)
+    draw.text((x_text, y_text1), f"{drowsy_text}: {drowsy_value}",
+              font=font_large, fill=drowsy_color)                 # 졸음여부 본문
+    draw.text((x_text, y_text2), f"{belt_text}: {belt_value}",
+              font=font_large, fill=belt_color)                   # 안전벨트 본문
+
+    # 데이터 값 색상(간단 임계로 시각 강조)
+    belt_prob_color = (0, 255, 0) if belt_conf >= 50 else (255, 0, 0)  # 벨트확률 색(항상 빨강 예상)
+    eye_color = (0, 255, 0) if eye_close_percent < 50 else (255, 0, 0) # 눈감김 색(50% 기준)
+    attention_color = (0, 255, 0) if attention_percent >= 60 else (255, 0, 0) # 전방주시 색(60% 기준)
+
+    draw.text((x_text, y_text3), f"벨트확률: {belt_conf:.1f}%",
+              font=font_large, fill=belt_prob_color)              # 벨트확률 본문(표시만)
+
+    if face_detected:                                             # 얼굴 검출 시 지표 본문
+        draw.text((x_text, y_text4), f"눈감김: {eye_close_percent:.1f}%",
+                  font=font_large, fill=eye_color)                # 눈감김% 본문
+        draw.text((x_text, y_text5), f"전방주시: {attention_percent:.1f}%",
+                  font=font_large, fill=attention_color)          # 전방주시% 본문
+    else:                                                         # 얼굴 미검출 시 N/A 회색 표기
+        draw.text((x_text, y_text4), "눈감김: N/A",
+                  font=font_large, fill=(128, 128, 128))          # 눈감김 N/A
+        draw.text((x_text, y_text5), "전방주시: N/A",
+                  font=font_large, fill=(128, 128, 128))          # 전방주시 N/A
+# 경로: ./drowsy_recorder_local_save.py
+# 목적: 로컬 폴더 저장판 - 메인 루프(카메라 캡처, FaceMesh 추정, 트리거/녹화/저장, FPS 제어) (3/3)
+
+# ======== 메인 함수 ========
+def main():
+    cap = cv2.VideoCapture(0)                                     # 기본 카메라(인덱스 0) 장치를 연다
+    cap.set(cv2.CAP_PROP_FPS, FPS)                                # 장치에 FPS 힌트를 설정(실제 반영은 환경에 의존)
+
+    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))          # 프레임 가로 픽셀 수를 읽는다
+    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))        # 프레임 세로 픽셀 수를 읽는다
+
+    frame_buffer = FrameBuffer(BUFFER_SIZE)                       # 사전 버퍼 길이를 갖는 FrameBuffer 생성
+    landmark_hist = deque(maxlen=600)                             # 얼굴 중심점 이력(약 30초@20fps) 보유
+    drowsy_start_time = None                                      # EAR/이동량 조건 연속 유지 시작 시각
+    sent_video = False                                            # 직전 저장 완료 플래그(쿨다운과 함께 재트리거 방지)
+    cooldown_start_time = None                                    # 쿨다운 시작 시각
+
+    # FaceMesh 컨텍스트를 with 블록으로 열어 자원 자동 관리를 수행
+    with mp_face_mesh.FaceMesh(
+        max_num_faces=1,                                          # 최대 1인 얼굴만 추적(운전자 시나리오)
+        refine_landmarks=True,                                    # 눈/입 주위 정밀 랜드마크 사용
+        min_detection_confidence=0.5,                             # 초기 검출 신뢰도 임계치
+        min_tracking_confidence=0.5                               # 추적 신뢰도 임계치
+    ) as face_mesh:
+        try:
+            while cap.isOpened():                                 # 카메라가 열려 있는 동안 루프
+                ret, frame = cap.read()                           # 프레임 읽기
+                if not ret:                                       # 읽기 실패 시
+                    break                                         # 루프 종료
+
+                start_time = time.time()                          # FPS 제어를 위한 처리 시작 시각 기록
+
+                frame = cv2.flip(frame, 1)                        # 미러 뷰를 위해 수평 플립(1)
+                frame_height, frame_width = frame.shape[:2]       # 플립 후 실제 크기 재확인
+                original_frame = frame.copy()                     # 시각화 전 원본 프레임을 보존(저장용)
+
+                # YOLO 제거: 안전벨트는 검출하지 않음(표시만 계속)
+                seatbelt_detected = False                         # 항상 False(미착용)로 고정 표기
+                belt_confidence = 0.0                             # 확률 0.0 고정
+
+                # PIL 드로잉을 위해 BGR→RGB 변환 후 Image 객체 생성
+                frame_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))  # PIL용 이미지
+                draw = ImageDraw.Draw(frame_pil)                  # 드로잉 컨텍스트 획득
+
+                # FaceMesh 추정 수행(BGR→RGB 변환하여 전달)
+                result = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))   # 얼굴 랜드마크 추정
+                drowsy_detected = False                           # 이번 프레임 졸음 판정 초기화
+                ear_value = 0                                     # EAR 값 초기화
+                face_detected = False                             # 얼굴 검출 플래그 초기화
+                distance_between_centers = 0                      # 현재 중심-평균 중심 거리 초기화
+
+                # 쿨다운(저장 후 일정 시간 재트리거 방지): 16초 경과 시 해제
+                if cooldown_start_time and time.time() - cooldown_start_time >= 16:
+                    cooldown_start_time = None                    # 쿨다운 종료
+                    sent_video = False                            # 다음 트리거 허용
+
+                if result.multi_face_landmarks:                   # 얼굴이 1명 이상 검출된 경우
+                    face_detected = True                          # 얼굴 검출 True 설정
+                    for face_landmarks in result.multi_face_landmarks:  # 검출된 얼굴마다 처리(여기선 1명)
+                        # 왼/오른쪽 눈 포인트를 픽셀 좌표로 수집
+                        left_eye_points = np.array([
+                            [face_landmarks.landmark[idx].x * frame_width,
+                             face_landmarks.landmark[idx].y * frame_height]
+                            for idx in LEFT_EYE_IDX
+                        ])
+                        right_eye_points = np.array([
+                            [face_landmarks.landmark[idx].x * frame_width,
+                             face_landmarks.landmark[idx].y * frame_height]
+                            for idx in RIGHT_EYE_IDX
+                        ])
+
+                        # EAR 계산(양안 평균)
+                        ear_value = eye_aspect_ratio(np.concatenate((left_eye_points, right_eye_points), axis=0))
+
+                        # 얼굴 중심점(미간 근처: 랜드마크 1번) 계산 및 이력 추가
+                        face_center_x = int(face_landmarks.landmark[1].x * frame_width)
+                        face_center_y = int(face_landmarks.landmark[1].y * frame_height)
+                        landmark_hist.append((face_center_x, face_center_y))
+
+                        # 평균 중심점(히스토리 기반) 계산
+                        avg_face_center_x = int(np.mean([p[0] for p in landmark_hist]))
+                        avg_face_center_y = int(np.mean([p[1] for p in landmark_hist]))
+
+                        # 현재 중심과 평균 중심 사이 유클리드 거리 계산(주시 안정성 간접 지표)
+                        distance_between_centers = np.sqrt(
+                            (avg_face_center_x - face_center_x) ** 2 +
+                            (avg_face_center_y - face_center_y) ** 2
+                        )
+
+                        # 간단한 졸음/주의 이탈 판정 로직(EAR<0.2 또는 이동량>40px 조건이 1초 이상 지속)
+                        if ear_value < 0.2 or distance_between_centers > 40:
+                            drowsy_start_time = time.time() if drowsy_start_time is None else drowsy_start_time
+                            if time.time() - drowsy_start_time >= 1:
+                                drowsy_detected = True
+                        else:
+                            drowsy_start_time = None
+
+                        # 얼굴 전체 바운딩 박스 시각화(최솟값/최댓값으로 박스 구성)
+                        x_coords = [lm.x * frame_width for lm in face_landmarks.landmark]
+                        y_coords = [lm.y * frame_height for lm in face_landmarks.landmark]
+                        x_min, x_max = int(min(x_coords)), int(max(x_coords))
+                        y_min, y_max = int(min(y_coords)), int(max(y_coords))
+                        draw.rectangle([(x_min, y_min), (x_max, y_max)], outline=(0, 0, 255), width=3)
+
+                        # 현재 중심점 ↔ 평균 중심점 연결선(빨강) 및 포인트(현재=청록, 평균=노랑) 표시
+                        draw.line([(face_center_x, face_center_y), (avg_face_center_x, avg_face_center_y)],
+                                  fill=(255, 0, 0), width=2)
+                        draw.ellipse((face_center_x - 5, face_center_y - 5, face_center_x + 5, face_center_y + 5),
+                                     fill=(0, 255, 255))
+                        draw.ellipse((avg_face_center_x - 5, avg_face_center_y - 5, avg_face_center_x + 5, avg_face_center_y + 5),
+                                     fill=(255, 255, 0))
+
+                        # 눈 포인트 라벨/점(작은 오렌지색) 시각화
+                        all_eye_points = np.concatenate((left_eye_points, right_eye_points), axis=0)
+                        for i, (ex, ey) in enumerate(all_eye_points):
+                            label = f"p{i+1}"
+                            draw.text((ex + 5, ey - 5), label, font=font_small, fill=(255, 165, 0))
+                            draw.ellipse((ex - 2, ey - 2, ex + 2, ey + 2), fill=(255, 165, 0))
+
+                # 상태 박스(좌상단) 항상 표시
+                current_distance = distance_between_centers if 'distance_between_centers' in locals() else 0
+                current_ear = ear_value if ear_value else 0
+                current_belt_conf = 0.0                              # YOLO 제거에 따라 0.0 고정
+                draw_status_box(draw, frame_width, frame_height, drowsy_detected,
+                                seatbelt_detected, current_ear, current_distance,
+                                current_belt_conf, face_detected)
+
+                # PIL → OpenCV(BGR) 역변환 및 프레임 버퍼에 추가
+                frame_visual = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
+                frame_buffer.add_frame(frame_visual, original_frame)
+
+                # 실시간 미리보기 창 업데이트
+                cv2.imshow("Drowsiness Detection (Local Save)", frame_visual)
+
+                # 졸음 트리거 발생 시 녹화 시작(사전 버퍼 포함)
+                if drowsy_detected and not sent_video and not frame_buffer.is_recording:
+                    frame_buffer.start_recording()
+
+                # 목표 길이에 도달하면 로컬 파일로 저장하고 쿨다운 시작
+                if frame_buffer.is_recording and frame_buffer.should_stop_recording():
+                    sent_video = True
+                    frames = frame_buffer.get_recording_frames()
+                    frame_buffer.clear_recording()
+                    save_video_locally(frames, (frame_width, frame_height))
+                    cooldown_start_time = time.time()
+
+                # FPS 제어(처리 시간 보정 후 남은 시간만큼 sleep)
+                elapsed_time = time.time() - start_time
+                wait_time = max(1.0 / FPS - elapsed_time, 0.001)
+                if wait_time > 0:
+                    time.sleep(wait_time)
+
+                # ESC(27) 입력 시 종료
+                if cv2.waitKey(5) & 0xFF == 27:
+                    break
+
+        finally:
+            cap.release()                                         # 카메라 장치 해제
+            cv2.destroyAllWindows()                               # 모든 OpenCV 윈도우 닫기
+
+# ======== 스크립트 진입점 ========
+if __name__ == "__main__":                                        # 모듈이 직접 실행되는 경우에만
+    main()                                                        # main() 함수 호출로 프로그램 시작
