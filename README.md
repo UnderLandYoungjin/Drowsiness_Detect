@@ -55,6 +55,11 @@ EAR만 그래프
 ![ear_distance_drowsiness_graph](https://github.com/user-attachments/assets/d57e1de9-b3e2-49ab-a7a8-00a0ffe3a9b9)
 
 
+---
+상세그래프
+<img width="2053" height="1132" alt="image" src="https://github.com/user-attachments/assets/8d2d8803-fe9a-43db-96a3-d239dc9c085c" />
+
+
 
 ---
 
