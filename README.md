@@ -64,8 +64,9 @@ EAR만 그래프
 
 ---
 
+<img width="2041" height="1289" alt="image" src="https://github.com/user-attachments/assets/b8e3bd28-c382-47a6-b2e1-93c2936046d1" />
 
-
+---
 https://github.com/user-attachments/assets/92a53f8c-e23a-483a-b95e-b9e05bc0d1c1
 
 
