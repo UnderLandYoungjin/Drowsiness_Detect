@@ -5,8 +5,19 @@ Drowsiness_Detect
 ---
 관련논문
 ---
+
 [6.일반_허영진_8_165-171.pdf](https://github.com/user-attachments/files/25564306/6._._8_165-171.pdf)
+
 ---
+
+
+
+https://github.com/user-attachments/assets/c3a690f9-848f-4431-994c-4690e1aefdd3
+
+
+
+---
+
 
 
 uese_mp4_test파일은 적외선 카메라로 찍은 mp4영상을 사용해서 test하는 프로그램입니다.
@@ -52,5 +63,9 @@ EAR만 그래프
 
 
 ---
+
+
+
+https://github.com/user-attachments/assets/f1bab2c7-d0ac-4d3e-835d-26fadf929cdc
 
 
