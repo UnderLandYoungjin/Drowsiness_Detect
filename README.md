@@ -16,6 +16,7 @@ uese_mp4_test파일은 적외선 카메라로 찍은 mp4영상을 사용해서 t
 
 ![image](https://github.com/user-attachments/assets/c6048826-3c92-4b59-9b1f-a570dea5d223)
 
+<img width="1828" height="1290" alt="image" src="https://github.com/user-attachments/assets/92f1c3c7-1f54-4574-9d7a-0eb769fa22a3" />
 
 
 
@@ -54,3 +55,8 @@ uese_mp4_test파일은 적외선 카메라로 찍은 mp4영상을 사용해서 t
 EAR만 그래프
 
 ![ear_distance_drowsiness_graph](https://github.com/user-attachments/assets/d57e1de9-b3e2-49ab-a7a8-00a0ffe3a9b9)
+
+
+---
+
+
