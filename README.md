@@ -66,6 +66,9 @@ EAR만 그래프
 
 
 
-https://github.com/user-attachments/assets/f1bab2c7-d0ac-4d3e-835d-26fadf929cdc
+https://github.com/user-attachments/assets/92a53f8c-e23a-483a-b95e-b9e05bc0d1c1
+
+
+
 
 
